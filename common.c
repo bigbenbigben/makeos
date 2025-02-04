@@ -86,11 +86,14 @@ errno_t strcpy_s(char *dst, size_t dst_size, const char *src) {
     if (dst_size == 0) return 22;   // Size 0 is not allowed
     char *d = dst;
     size_t i;
-    for (i = 0; i < dst_size - 1 && src[i] != '\0'; i++) {
+    for (i = 0; i < dst_size - 1 && *src != '\0'; i++) {
         *d++ = *src++;
     }
     *d = '\0';  // Always null-terminate
-    if (src[i] != '\0') return 34;  // ERANGE (Buffer too small)
+    if (*src != '\0') {
+        if (dst_size > 0) *dst = '\0'; // ERANGE (Buffer too small)
+        return 34;
+    }
     return 0;
 }
 
