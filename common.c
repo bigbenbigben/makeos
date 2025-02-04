@@ -81,6 +81,19 @@ char *strcpy(char *dst, const char *src) {
     return dst;
 }
 
+errno_t strcpy_s(char *dst, size_t dst_size, const char *src) {
+    if (!dst || !src) return 22;   // EINVAL (Invalid argument)
+    if (dst_size == 0) return 22;   // Size 0 is not allowed
+    char *d = dst;
+    size_t i;
+    for (i = 0; i < dst_size - 1 && src[i] != '\0'; i++) {
+        *d++ = *src++;
+    }
+    *d = '\0';  // Always null-terminate
+    if (src[i] != '\0') return 34;  // ERANGE (Buffer too small)
+    return 0;
+}
+
 int strcmp(const char *s1, const char *s2) {
     while (*s1 && *s2) {
         if (*s1 != *s2)

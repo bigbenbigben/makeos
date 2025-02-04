@@ -8,6 +8,7 @@ typedef unsigned long long uint64_t;
 typedef uint32_t size_t;
 typedef uint32_t paddr_t;
 typedef uint32_t vaddr_t;
+typedef int errno_t;
 
 #define true  1
 #define false 0
@@ -22,6 +23,7 @@ typedef uint32_t vaddr_t;
 
 void *memset(void *buf, char c, size_t n);
 void *memcpy(void *dst, const void *src, size_t n);
-void *strcpy(char *dst, const char *src);
+char *strcpy(char *dst, const char *src);
 int strcmp(const char *s1, const char *s2);
 void printf(const char *fmt, ...);
+errno_t strcpy_s(char *dst, size_t dst_size, const char *src);
