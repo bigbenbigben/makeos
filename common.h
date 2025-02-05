@@ -27,3 +27,5 @@ char *strcpy(char *dst, const char *src);
 int strcmp(const char *s1, const char *s2);
 void printf(const char *fmt, ...);
 errno_t strcpy_s(char *dst, size_t dst_size, const char *src);
+
+#define PAGE_SIZE 4096

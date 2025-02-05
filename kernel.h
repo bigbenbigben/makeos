@@ -61,3 +61,4 @@ struct trap_frame {
     } while (0)
 
 void handle_trap(struct trap_frame *f);
+paddr_t alloc_pages(uint32_t n);
