@@ -1,4 +1,18 @@
 #pragma once
+#include "common.h"
+
+#define PROCS_MAX 8         // 最大プロセス数
+#define PROC_UNUSED     0   // 未使用のプロセス管理構造体
+#define PROC_RUNNABLE   1   // 実行可能なプロセス
+#define SATP_SV32 (1u << 31)
+#define PAGE_V    (1 << 0)  // 有効化ビット
+#define PAGE_R    (1 << 1)  // 読み込み可能
+#define PAGE_W    (1 << 2)  // 書き込み可能
+#define PAGE_X    (1 << 3)  // 実行可能
+#define PAGE_U    (1 << 4)  // ユーザーモードでアクセス可能
+#define USER_BASE 0x1000000
+#define SSTATUS_SPIE (1 << 5)
+#define SCAUSE_ECALL 8
 
 #define PANIC(fmt, ...)                                                         \
     do{                                                                         \
@@ -60,14 +74,6 @@ struct trap_frame {
         __asm__ __volatile__("csrw " #reg ", %0" ::"r"(__tmp));                         \
     } while (0)
 
-void handle_trap(struct trap_frame *f);
-paddr_t alloc_pages(uint32_t n);
-
-#define PROCS_MAX 8         // 最大プロセス数
-
-#define PROC_UNUSED     0   // 未使用のプロセス管理構造体
-#define PROC_RUNNABLE   1   // 実行可能なプロセス
-
 struct process {
     int pid;                // プロセスID
     int state;              // プロセスの状態: PROC_UNUSED または PROC_RUNNABLE
@@ -75,18 +81,3 @@ struct process {
     uint32_t *page_table;   // ページテーブル
     uint8_t stack[8192];    // カーネルスタック
 };
-
-void yield(void);
-
-#define SATP_SV32 (1u << 31)
-#define PAGE_V    (1 << 0)  // 有効化ビット
-#define PAGE_R    (1 << 1)  // 読み込み可能
-#define PAGE_W    (1 << 2)  // 書き込み可能
-#define PAGE_X    (1 << 3)  // 実行可能
-#define PAGE_U    (1 << 4)  // ユーザーモードでアクセス可能
-
-void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags);
-
-#define USER_BASE 0x1000000
-
-#define SSTATUS_SPIE (1 << 5)

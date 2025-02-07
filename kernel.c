@@ -5,7 +5,59 @@
 #include "kernel.h"
 #include "common.h"
 
-extern char __bss[], __bss_end[], __stack_top[];
+extern char __kernel_base[];
+extern char __stack_top[];
+extern char __bss[], __bss_end[];
+extern char __free_ram[], __free_ram_end[];
+extern char _binary_shell_bin_start[], _binary_shell_bin_size[];
+
+struct process procs[PROCS_MAX];
+struct process *current_proc;   // 現在実行中のプロセス
+struct process *idle_proc;      // アイドルプロセス
+
+// ↓ __attribute__((naked)) が追加されていることに注意
+__attribute__((naked)) void user_entry(void) {
+    __asm__ __volatile__(
+        "csrw sepc, %[sepc]\n"
+        "csrw sstatus, %[sstatus]\n"
+        "sret\n"
+        :
+        : [sepc] "r" (USER_BASE),
+        [sstatus] "r" (SSTATUS_SPIE)
+    );
+}
+
+paddr_t alloc_pages(uint32_t n) {
+    static paddr_t next_paddr = (paddr_t) __free_ram;
+    paddr_t paddr = next_paddr;
+    next_paddr += n * PAGE_SIZE;
+
+    if (next_paddr > (paddr_t) __free_ram_end)
+        PANIC("out of memory");
+
+    memset((void *) paddr, 0, n * PAGE_SIZE);
+    return paddr;
+}
+
+void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags) {
+    if (!is_aligned(vaddr, PAGE_SIZE))
+        PANIC("unaligned vaddr %x", vaddr);
+
+    if (!is_aligned(paddr, PAGE_SIZE))
+        PANIC("unaligned paddr %x", paddr);
+    
+    uint32_t vpn1 = (vaddr >> 22) & 0x3ff;
+    if ((table1[vpn1] & PAGE_V) == 0) {
+        // 2段目のページテーブルが存在しないので作成する
+        uint32_t pt_paddr = alloc_pages(1);
+        table1[vpn1] = ((pt_paddr / PAGE_SIZE) << 10) | PAGE_V;
+    }
+
+    // 2段目のページテーブルにエントリを追加する
+    uint32_t vpn0 = (vaddr >> 12) & 0x3ff;
+    uint32_t *table0 = (uint32_t *) ((table1[vpn1] >> 10) * PAGE_SIZE);
+    table0[vpn0] = ((paddr / PAGE_SIZE) << 10) | flags | PAGE_V;
+}
 
 struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4,
                        long arg5, long fid, long eid) {
@@ -31,15 +83,16 @@ void putchar(char ch) {
     sbi_call(ch, 0, 0, 0, 0, 0, 0, 1 /* Console Putchar */);
 }
 
-void handle_trap(struct trap_frame *f) {
-    uint32_t scause = READ_CSR(scause);
-    uint32_t stval = READ_CSR(stval);
-    uint32_t user_pc = READ_CSR(sepc);
-
-    PANIC("unexpected trap scause=%x, stval=%x, sepc=%x\n", scause, stval, user_pc);
+long getchar(void) {
+    struct sbiret ret = sbi_call(0, 0, 0, 0, 0, 0, 0, 2);
+    return ret.error;
 }
 
-__attribute__((section(".text.boot")))
+void delay(void) {
+    for (int i = 0; i < 30000000; i++)
+        __asm__ __volatile__("nop"); // 何もしない命令
+}
+
 __attribute__((naked))
 __attribute__((aligned(4)))
 void kernel_entry(void) {
@@ -124,24 +177,7 @@ void kernel_entry(void) {
         "sret\n"
     );
 }
-
-extern char __free_ram[], __free_ram_end[];
-
-paddr_t alloc_pages(uint32_t n) {
-    static paddr_t next_paddr = (paddr_t) __free_ram;
-    paddr_t paddr = next_paddr;
-    next_paddr += n * PAGE_SIZE;
-
-    if (next_paddr > (paddr_t) __free_ram_end)
-        PANIC("out of memory");
-
-    memset((void *) paddr, 0, n * PAGE_SIZE);
-    return paddr;
-}
-
-struct process procs[PROCS_MAX];
-
-__attribute__((naked)) void switch_context(uint32_t *prev_sp,
+__attribute__((naked))void switch_context(uint32_t *prev_sp,
                                            uint32_t *next_sp) {
     __asm__ __volatile__(
         // 実行中プロセスのスタックへレジスタを保存
@@ -181,20 +217,6 @@ __attribute__((naked)) void switch_context(uint32_t *prev_sp,
         "addi sp, sp, 13 * 4\n"
         "ret\n"
     );    
-}
-
-extern char __kernel_base[];
-
-// ↓ __attribute__((naked)) が追加されていることに注意
-__attribute__((naked)) void user_entry(void) {
-    __asm__ __volatile__(
-        "csrw sepc, %[sepc]\n"
-        "csrw sstatus, %[sstatus]\n"
-        "sret\n"
-        :
-        : [sepc] "r" (USER_BASE),
-        [sstatus] "r" (SSTATUS_SPIE)
-    );
 }
 
 struct process *create_process(const void *image, size_t image_size) {
@@ -259,37 +281,6 @@ struct process *create_process(const void *image, size_t image_size) {
 
 }
 
-void delay(void) {
-    for (int i = 0; i < 30000000; i++)
-        __asm__ __volatile__("nop"); // 何もしない命令
-}
-
-struct process *proc_a;
-struct process *proc_b;
-
-void proc_a_entry(void) {
-    printf("starting process A\n");
-    while (1) {
-        putchar('A');
-        yield();
-        switch_context(&proc_a->sp, &proc_b->sp);
-        delay();
-    }
-}
-
-void proc_b_entry(void) {
-    printf("starting process B\n");
-    while (1) {
-        putchar('B');
-        switch_context(&proc_b->sp, &proc_a->sp);
-        yield();
-        delay();
-    }
-}
-
-struct process *current_proc;   // 現在実行中のプロセス
-struct process *idle_proc;      // アイドルプロセス
-
 void yield(void) {
     // 実行可能なプロセスを探す
     struct process *next = idle_proc;
@@ -322,44 +313,80 @@ void yield(void) {
     switch_context(&prev->sp, &next->sp);
 }
 
-void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags) {
-    if (!is_aligned(vaddr, PAGE_SIZE))
-        PANIC("unaligned vaddr %x", vaddr);
+void handle_syscall(struct trap_frame *f) {
+    switch (f->a3) {
+        case SYS_GETCHAR:
+            while (1) {
+                long ch = getchar();
+                if (ch >= 0) {
+                    f->a0 = ch;
+                    break;
+                }
 
-    if (!is_aligned(paddr, PAGE_SIZE))
-        PANIC("unaligned paddr %x", paddr);
-    
-    uint32_t vpn1 = (vaddr >> 22) & 0x3ff;
-    if ((table1[vpn1] & PAGE_V) == 0) {
-        // 2段目のページテーブルが存在しないので作成する
-        uint32_t pt_paddr = alloc_pages(1);
-        table1[vpn1] = ((pt_paddr / PAGE_SIZE) << 10) | PAGE_V;
+                yield();
+            }
+            break;
+        case SYS_PUTCHAR:
+            putchar(f->a0);
+            break;
+        default:
+            PANIC("unexpected syscall a3=%x\n", f->a3);
     }
-
-    // 2段目のページテーブルにエントリを追加する
-    uint32_t vpn0 = (vaddr >> 12) & 0x3ff;
-    uint32_t *table0 = (uint32_t *) ((table1[vpn1] >> 10) * PAGE_SIZE);
-    table0[vpn0] = ((paddr / PAGE_SIZE) << 10) | flags | PAGE_V;
 }
 
-extern char _binary_shell_bin_start[], _binary_shell_bin_size[];
+void handle_trap(struct trap_frame *f) {
+    uint32_t scause = READ_CSR(scause);
+    uint32_t stval = READ_CSR(stval);
+    uint32_t user_pc = READ_CSR(sepc);
+    if (scause == SCAUSE_ECALL) {
+        handle_syscall(f);
+        user_pc += 4;
+    } else {
+        PANIC("unexpected trap scause=%x, stval=%x, sepc=%x\n", scause, stval, user_pc);
+    }
+
+    WRITE_CSR(sepc, user_pc);
+}
+
+struct process *proc_a;
+struct process *proc_b;
+
+void proc_a_entry(void) {
+    printf("starting process A\n");
+    while (1) {
+        putchar('A');
+        yield();
+        switch_context(&proc_a->sp, &proc_b->sp);
+        delay();
+    }
+}
+
+void proc_b_entry(void) {
+    printf("starting process B\n");
+    while (1) {
+        putchar('B');
+        switch_context(&proc_b->sp, &proc_a->sp);
+        yield();
+        delay();
+    }
+}
 
 void kernel_main(void) {
-    printf("\n\nHello %s\n", "World!");
     // printf("2 + 2 = %d, %x\n", 1 + 2, 0x1234abcd);
     memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
+    printf("\n\nHello %s\n", "World!");
 
-    paddr_t paddr0 = alloc_pages(2);
-    paddr_t paddr1 = alloc_pages(1);
-    printf("alloc_pages test: paddr0=%x\n", paddr0);
-    printf("alloc_pages test: paddr1=%x\n", paddr1);
+    // paddr_t paddr0 = alloc_pages(2);
+    // paddr_t paddr1 = alloc_pages(1);
+    // printf("alloc_pages test: paddr0=%x\n", paddr0);
+    // printf("alloc_pages test: paddr1=%x\n", paddr1);
 
     // PANIC("booted!");
     // printf("unreachable here!\n");
 
     WRITE_CSR(stvec, (uint32_t) kernel_entry);
 
-    idle_proc = create_process((uint32_t) NULL, 0);
+    idle_proc = create_process(NULL, 0);
     idle_proc->pid = -1; // idle
     current_proc = idle_proc;
 
@@ -370,17 +397,20 @@ void kernel_main(void) {
     // proc_a_entry();
 
     yield();
+
     PANIC("switched to idle process");
 
     // PANIC("unreachable here!");
 
-    __asm__ __volatile__("unimp");  // Invalid instruction
+    // __asm__ __volatile__("unimp");  // Invalid instruction
 
-    for (;;) {
-        __asm__ __volatile__("wfi");
-    }
+    // for (;;) {
+    //     __asm__ __volatile__("wfi");
+    // }
 }
 
+__attribute__((section(".text.boot")))
+__attribute__((naked))
 void boot(void) {
     __asm__ __volatile__(
         "mv sp, %[stack_top]\n"
