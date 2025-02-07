@@ -88,3 +88,5 @@ void yield(void);
 void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags);
 
 #define USER_BASE 0x1000000
+
+#define SSTATUS_SPIE (1 << 5)

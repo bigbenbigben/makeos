@@ -185,8 +185,16 @@ __attribute__((naked)) void switch_context(uint32_t *prev_sp,
 
 extern char __kernel_base[];
 
-void user_entry(void) {
-    PANIC("not yet implemented");  // 後で実装する
+// ↓ __attribute__((naked)) が追加されていることに注意
+__attribute__((naked)) void user_entry(void) {
+    __asm__ __volatile__(
+        "csrw sepc, %[sepc]\n"
+        "csrw sstatus, %[sstatus]\n"
+        "sret\n"
+        :
+        : [sepc] "r" (USER_BASE),
+        [sstatus] "r" (SSTATUS_SPIE)
+    );
 }
 
 struct process *create_process(const void *image, size_t image_size) {
