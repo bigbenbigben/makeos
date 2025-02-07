@@ -12,7 +12,8 @@
 #define PAGE_U    (1 << 4)  // ユーザーモードでアクセス可能
 #define USER_BASE 0x1000000
 #define SSTATUS_SPIE (1 << 5)
-#define SCAUSE_ECALL 8
+#define SCAUSE_ECALL    8
+#define PROC_EXITED     2
 
 #define PANIC(fmt, ...)                                                         \
     do{                                                                         \
@@ -24,8 +25,6 @@ struct sbiret {
     long error;
     long value;
 };
-
-#include "common.h"
 
 struct trap_frame {
     uint32_t ra;
