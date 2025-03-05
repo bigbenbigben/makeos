@@ -37,3 +37,11 @@ __attribute__((noreturn)) void exit(void) {
     syscall(SYS_EXIT, 0, 0, 0);
     for (;;); // 念のため
 }
+
+int readfile(const char *filename, char *buf, int len) {
+    return syscall(SYS_READFILE, (int) filename, (int) buf, len);
+}
+
+int writefile(const char *filename, const char *buf, int len) {
+    return syscall(SYS_WRITEFILE, (int) filename, (int) buf, len);
+}

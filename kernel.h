@@ -44,6 +44,8 @@
 #define FILES_MAX       2
 #define DISK_MAX_SIZE   align_up(sizeof(struct file) * FILES_MAX, SECTOR_SIZE)
 
+#define SSTATUS_SUM (1 << 18)
+
 struct virtq_desc {
     uint64_t addr;
     uint32_t len;
@@ -165,7 +167,7 @@ struct tar_header {
     char mtime[12];
     char checksum[8];
     char type;
-    char liinkname[100];
+    char linkname[100];
     char magic[6];
     char version[2];
     char uname[32];

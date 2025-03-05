@@ -15,20 +15,7 @@ struct process procs[PROCS_MAX];
 struct process *current_proc;   // 現在実行中のプロセス
 struct process *idle_proc;      // アイドルプロセス
 
-struct file files[FILES_MAX];
-uint8_t disk[DISK_MAX_SIZE];
 
-// ↓ __attribute__((naked)) が追加されていることに注意
-__attribute__((naked)) void user_entry(void) {
-    __asm__ __volatile__(
-        "csrw sepc, %[sepc]\n"
-        "csrw sstatus, %[sstatus]\n"
-        "sret\n"
-        :
-        : [sepc] "r" (USER_BASE),
-        [sstatus] "r" (SSTATUS_SPIE)
-    );
-}
 
 paddr_t alloc_pages(uint32_t n) {
     static paddr_t next_paddr = (paddr_t) __free_ram;
@@ -136,7 +123,7 @@ struct virtio_virtq *virtq_init(unsigned index) {
 
 void virtio_blk_init(void) {
     if (virtio_reg_read32(VIRTIO_REG_MAGIC) != 0x74726976)
-        PANIC("virtio: invalid magic vale");
+        PANIC("virtio: invalid magic value");
     if (virtio_reg_read32(VIRTIO_REG_VERSION) != 1)
         PANIC("virtio: invalid version");
     if (virtio_reg_read32(VIRTIO_REG_DEVICE_ID) != VIRTIO_DEVICE_BLK)
@@ -227,6 +214,9 @@ void delay(void) {
         __asm__ __volatile__("nop"); // 何もしない命令
 }
 
+struct file files[FILES_MAX];
+uint8_t disk[DISK_MAX_SIZE];
+
 int oct2int(char *oct, int len) {
     int dec = 0;
     for (int i = 0; i < len; i++) {
@@ -236,6 +226,52 @@ int oct2int(char *oct, int len) {
         dec = dec * 8 + (oct[i] - '0');
     }
     return dec;
+}
+
+void fs_flush(void) {
+    // files変数の各ファイルの内容をdisk変数に書き込む
+    memset(disk, 0, sizeof(disk));
+    unsigned off = 0;
+    for (int file_i = 0; file_i < FILES_MAX; file_i++) {
+        struct file *file = &files[file_i];
+        if (!file->in_use)
+            continue;
+
+        struct tar_header *header = (struct tar_header *) &disk[off];
+        memset(header, 0, sizeof(*header));
+        strcpy(header->name, file->name);
+        strcpy(header->mode, "000644");
+        strcpy(header->magic, "ustar");
+        strcpy(header->version, "00");
+        header->type = '0';
+
+        // ファイルサイズを8進数文字列に変換
+        int filesz = file->size;
+        for (int i = sizeof(header->size); i > 0; i--) {
+            header->size[i - 1] = (filesz % 8) + '0';
+            filesz /= 8;
+        }
+
+        // チェックサムを計算
+        int checksum = ' ' * sizeof(header->checksum);
+        for (unsigned i = 0; i < sizeof(struct tar_header); i++)
+            checksum += (unsigned char) disk[off + i];
+
+        for (int i = 5; i >= 0; i--) {
+            header->checksum[i] = (checksum % 8) + '0';
+            checksum /= 8;
+        }
+
+        // ファイルデータをコピー
+        memcpy(header->data, file->data, file->size);
+        off += align_up(sizeof(struct tar_header) + file->size, SECTOR_SIZE);
+    }
+
+    // disk変数の内容をディスクに書き込む
+    for (unsigned sector = 0; sector < sizeof(disk) / SECTOR_SIZE; sector++)
+        read_write_disk(&disk[sector * SECTOR_SIZE], sector, true);
+
+    printf("wrote %d bytes to disk\n", sizeof(disk));
 }
 
 void fs_init(void) {
@@ -261,6 +297,16 @@ void fs_init(void) {
 
         off += align_up(sizeof(struct tar_header) + filesz, SECTOR_SIZE);
     }
+}
+
+struct file *fs_lookup(const char *filename) {
+    for (int i = 0; i < FILES_MAX; i++) {
+        struct file *file = &files[i];
+        if (!strcmp(file->name, filename))
+            return file;
+    }
+
+    return NULL;
 }
 
 __attribute__((naked))
@@ -304,7 +350,7 @@ void kernel_entry(void) {
 
         // 例外発生時のspを取り出して保存
         "csrr a0, sscratch\n"
-        "sw a0, 4 * 30(sp)\n"
+        "sw a0,  4 * 30(sp)\n"
 
         // カーネルスタックを設定し直す
         "addi a0, sp, 4 * 31\n"
@@ -347,7 +393,20 @@ void kernel_entry(void) {
         "sret\n"
     );
 }
-__attribute__((naked))void switch_context(uint32_t *prev_sp,
+
+// ↓ __attribute__((naked)) が追加されていることに注意
+__attribute__((naked)) void user_entry(void) {
+    __asm__ __volatile__(
+        "csrw sepc, %[sepc]\n"
+        "csrw sstatus, %[sstatus]\n"
+        "sret\n"
+        :
+        : [sepc] "r" (USER_BASE),
+          [sstatus] "r" (SSTATUS_SPIE | SSTATUS_SUM)
+    );
+}
+
+__attribute__((naked)) void switch_context(uint32_t *prev_sp,
                                            uint32_t *next_sp) {
     __asm__ __volatile__(
         // 実行中プロセスのスタックへレジスタを保存
@@ -401,7 +460,7 @@ struct process *create_process(const void *image, size_t image_size) {
     }
 
     if (!proc)
-        PANIC("no free process srots");
+        PANIC("no free process slots");
 
     // switch_context() で復帰できるように、スタックに呼び出し先保存レジスタを積む
     uint32_t *sp = (uint32_t *) &proc->stack[sizeof(proc->stack)];
@@ -419,7 +478,7 @@ struct process *create_process(const void *image, size_t image_size) {
     *--sp = 0;                      // s0
     *--sp = (uint32_t) user_entry;  // ra
     
-    uint32_t *page_table = (uint32_t*) alloc_pages(1);
+    uint32_t *page_table = (uint32_t *) alloc_pages(1);
 
     // カーネルのページをマッピングする
     for (paddr_t paddr = (paddr_t) __kernel_base;
@@ -487,11 +546,9 @@ void yield(void) {
 
 void handle_syscall(struct trap_frame *f) {
     switch (f->a3) {
-        case SYS_EXIT:
-            printf("process %d exited\n", current_proc->pid);
-            current_proc->state = PROC_EXITED;
-            yield();
-            PANIC("unreachable");
+        case SYS_PUTCHAR:
+            putchar(f->a0);
+            break;
         case SYS_GETCHAR:
             while (1) {
                 long ch = getchar();
@@ -503,9 +560,37 @@ void handle_syscall(struct trap_frame *f) {
                 yield();
             }
             break;
-        case SYS_PUTCHAR:
-            putchar(f->a0);
+        case SYS_EXIT:
+            printf("process %d exited\n", current_proc->pid);
+            current_proc->state = PROC_EXITED;
+            yield();
+            PANIC("unreachable");
+        case SYS_READFILE:
+        case SYS_WRITEFILE: {
+            const char *filename = (const char *) f->a0;
+            char *buf = (char *) f->a1;
+            int len = f->a2;
+            struct file *file = fs_lookup(filename);
+            if (!file) {
+                printf("file not found: %s\n", filename);
+                f->a0 = -1;
+                break;
+            }
+
+            if (len > (int) sizeof(file->data))
+                len = file->size;
+
+            if (f->a3 == SYS_WRITEFILE) {
+                memcpy(file->data, buf, len);
+                file->size = len;
+                fs_flush();
+            } else {
+                memcpy(buf, file->data, len);
+            }
+
+            f->a0 = len;
             break;
+        }
         default:
             PANIC("unexpected syscall a3=%x\n", f->a3);
     }
@@ -564,7 +649,7 @@ void kernel_main(void) {
     WRITE_CSR(stvec, (uint32_t) kernel_entry);
 
     virtio_blk_init();
-    fs_init();
+    // fs_init();
 
     char buf[SECTOR_SIZE];
     read_write_disk(buf, 0, false);
@@ -574,7 +659,7 @@ void kernel_main(void) {
     read_write_disk(buf, 0, true);
 
     idle_proc = create_process(NULL, 0);
-    idle_proc->pid = -1; // idle
+    idle_proc->pid = 0; // idle
     current_proc = idle_proc;
 
     // proc_a = create_process((uint32_t) proc_a_entry);
