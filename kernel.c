@@ -1,7 +1,3 @@
-// typedef unsigned char uint8_t;
-// typedef unsigned int uint32_t;
-// typedef uint32_t size_t;
-
 #include "kernel.h"
 #include "common.h"
 
@@ -12,10 +8,8 @@ extern char __free_ram[], __free_ram_end[];
 extern char _binary_shell_bin_start[], _binary_shell_bin_size[];
 
 struct process procs[PROCS_MAX];
-struct process *current_proc;   // 現在実行中のプロセス
-struct process *idle_proc;      // アイドルプロセス
-
-
+struct process *current_proc;
+struct process *idle_proc;
 
 paddr_t alloc_pages(uint32_t n) {
     static paddr_t next_paddr = (paddr_t) __free_ram;
@@ -35,15 +29,13 @@ void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags) {
 
     if (!is_aligned(paddr, PAGE_SIZE))
         PANIC("unaligned paddr %x", paddr);
-    
+
     uint32_t vpn1 = (vaddr >> 22) & 0x3ff;
     if ((table1[vpn1] & PAGE_V) == 0) {
-        // 2段目のページテーブルが存在しないので作成する
         uint32_t pt_paddr = alloc_pages(1);
         table1[vpn1] = ((pt_paddr / PAGE_SIZE) << 10) | PAGE_V;
     }
 
-    // 2段目のページテーブルにエントリを追加する
     uint32_t vpn0 = (vaddr >> 12) & 0x3ff;
     uint32_t *table0 = (uint32_t *) ((table1[vpn1] >> 10) * PAGE_SIZE);
     table0[vpn0] = ((paddr / PAGE_SIZE) << 10) | flags | PAGE_V;
@@ -59,7 +51,6 @@ struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4,
     register long a5 __asm__("a5") = arg5;
     register long a6 __asm__("a6") = fid;
     register long a7 __asm__("a7") = eid;
-
 
     __asm__ __volatile__("ecall"
                          : "=r"(a0), "=r"(a1)
@@ -90,13 +81,10 @@ void virtio_reg_fetch_and_or32(unsigned offset, uint32_t value) {
     virtio_reg_write32(offset, virtio_reg_read32(offset) | value);
 }
 
-// デバイスが処理中のリクエストがあるかどうかを返す。
 bool virtq_is_busy(struct virtio_virtq *vq) {
     return vq->last_used_index != *vq->used_index;
 }
 
-// デバイスに新しいリクエストがあることを通知する。desc_indexは、新しいリクエストの
-// 先頭ディスクリプタのインデックス。
 void virtq_kick(struct virtio_virtq *vq, int desc_index) {
     vq->avail.ring[vq->avail.index % VIRTQ_ENTRY_NUM] = desc_index;
     vq->avail.index++;
@@ -110,13 +98,9 @@ struct virtio_virtq *virtq_init(unsigned index) {
     struct virtio_virtq *vq = (struct virtio_virtq *) virtq_paddr;
     vq->queue_index = index;
     vq->used_index = (volatile uint16_t *) &vq->used.index;
-    // 1. Select the queue writing its index (first queue is 0) to QueueSel.
     virtio_reg_write32(VIRTIO_REG_QUEUE_SEL, index);
-    // 5. Notify the devbice about the queue size by writing the size to QueueNum.
     virtio_reg_write32(VIRTIO_REG_QUEUE_NUM, VIRTQ_ENTRY_NUM);
-    // 6. Notivy the device about the used alignment by writing its value in bytes to QueueAlign.
     virtio_reg_write32(VIRTIO_REG_QUEUE_ALIGN, 0);
-    // 7. Write the physical number of the first page of the queue to the QueuePFN register.
     virtio_reg_write32(VIRTIO_REG_QUEUE_PFN, virtq_paddr);
     return vq;
 }
@@ -129,43 +113,33 @@ void virtio_blk_init(void) {
     if (virtio_reg_read32(VIRTIO_REG_DEVICE_ID) != VIRTIO_DEVICE_BLK)
         PANIC("virtio: invalid device id");
 
-    // 1. Reset the device.
     virtio_reg_write32(VIRTIO_REG_DEVICE_STATUS, 0);
-    // 2. Set the ACKNOWLEDGE status bit: the guest OS has noticed the device.
     virtio_reg_fetch_and_or32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_ACK);
-    // 3. Set the DRIVER status bit.
     virtio_reg_fetch_and_or32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_DRIVER);
-    // 5. Set the FEATURES_OK status bit.
     virtio_reg_fetch_and_or32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_FEAT_OK);
-    // 7. Perform device-specific setup, includeing discovery of virtqueues for the device.
     blk_request_vq = virtq_init(0);
-    // 8. set the DRIVER_OK status bit.
     virtio_reg_write32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_DRIVER_OK);
 
-    // ディスクの容量を崇徳
     blk_capacity = virtio_reg_read64(VIRTIO_REG_DEVICE_CONFIG + 0) * SECTOR_SIZE;
     printf("virtio-blk: capacity is %d bytes\n", blk_capacity);
 
-    // デバイスへの処理要求を格納する領域を確保
     blk_req_paddr = alloc_pages(align_up(sizeof(*blk_req), PAGE_SIZE) / PAGE_SIZE);
     blk_req = (struct virtio_blk_req *) blk_req_paddr;
 }
 
-// virtio-blkデバイスの読み書き。
 void read_write_disk(void *buf, unsigned sector, int is_write) {
     if (sector >= blk_capacity / SECTOR_SIZE) {
         printf("virtio: tried to read/write sector=%d, but capacity is %d\n",
-            sector, blk_capacity / SECTOR_SIZE);
+              sector, blk_capacity / SECTOR_SIZE);
         return;
     }
 
-    // virtio-blkの仕様にしたがって、リクエストを構築する
     blk_req->sector = sector;
     blk_req->type = is_write ? VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
+
     if (is_write)
         memcpy(blk_req->data, buf, SECTOR_SIZE);
 
-    // virtqueueのディスクリプタを構築する （3つのディスクリプタを使う）
     struct virtio_virtq *vq = blk_request_vq;
     vq->descs[0].addr = blk_req_paddr;
     vq->descs[0].len = sizeof(uint32_t) * 2 + sizeof(uint64_t);
@@ -181,37 +155,18 @@ void read_write_disk(void *buf, unsigned sector, int is_write) {
     vq->descs[2].len = sizeof(uint8_t);
     vq->descs[2].flags = VIRTQ_DESC_F_WRITE;
 
-    // デバイスに新しいリクエストがあることを通知する
     virtq_kick(vq, 0);
-
-    // デバイス側の処理が終わるまで待つ
     while (virtq_is_busy(vq))
         ;
 
-    // virtio-blk: 0でない値が返ってきたらエラー
     if (blk_req->status != 0) {
         printf("virtio: warn: failed to read/write sector=%d status=%d\n",
                sector, blk_req->status);
         return;
     }
 
-    // 読み込み処理の場合は、バッファにデータをコピーする
     if (!is_write)
         memcpy(buf, blk_req->data, SECTOR_SIZE);
-}
-
-void putchar(char ch) {
-    sbi_call(ch, 0, 0, 0, 0, 0, 0, 1 /* Console Putchar */);
-}
-
-long getchar(void) {
-    struct sbiret ret = sbi_call(0, 0, 0, 0, 0, 0, 0, 2);
-    return ret.error;
-}
-
-void delay(void) {
-    for (int i = 0; i < 30000000; i++)
-        __asm__ __volatile__("nop"); // 何もしない命令
 }
 
 struct file files[FILES_MAX];
@@ -229,7 +184,6 @@ int oct2int(char *oct, int len) {
 }
 
 void fs_flush(void) {
-    // files変数の各ファイルの内容をdisk変数に書き込む
     memset(disk, 0, sizeof(disk));
     unsigned off = 0;
     for (int file_i = 0; file_i < FILES_MAX; file_i++) {
@@ -245,14 +199,12 @@ void fs_flush(void) {
         strcpy(header->version, "00");
         header->type = '0';
 
-        // ファイルサイズを8進数文字列に変換
         int filesz = file->size;
         for (int i = sizeof(header->size); i > 0; i--) {
             header->size[i - 1] = (filesz % 8) + '0';
             filesz /= 8;
         }
 
-        // チェックサムを計算
         int checksum = ' ' * sizeof(header->checksum);
         for (unsigned i = 0; i < sizeof(struct tar_header); i++)
             checksum += (unsigned char) disk[off + i];
@@ -262,12 +214,10 @@ void fs_flush(void) {
             checksum /= 8;
         }
 
-        // ファイルデータをコピー
         memcpy(header->data, file->data, file->size);
         off += align_up(sizeof(struct tar_header) + file->size, SECTOR_SIZE);
     }
 
-    // disk変数の内容をディスクに書き込む
     for (unsigned sector = 0; sector < sizeof(disk) / SECTOR_SIZE; sector++)
         read_write_disk(&disk[sector * SECTOR_SIZE], sector, true);
 
@@ -309,12 +259,19 @@ struct file *fs_lookup(const char *filename) {
     return NULL;
 }
 
+void putchar(char ch) {
+    sbi_call(ch, 0, 0, 0, 0, 0, 0, 1 /* Console Putchar */);
+}
+
+long getchar(void) {
+    struct sbiret ret = sbi_call(0, 0, 0, 0, 0, 0, 0, 2);
+    return ret.error;
+}
+
 __attribute__((naked))
 __attribute__((aligned(4)))
 void kernel_entry(void) {
     __asm__ __volatile__(
-        // 実行中プロセスのカーネルスタックをsscratchから取り出す
-        // tmp = sp; sp = sscratch; sscratch = tmp;
         "csrrw sp, sscratch, sp\n"
         "addi sp, sp, -4 * 31\n"
         "sw ra,  4 * 0(sp)\n"
@@ -348,11 +305,9 @@ void kernel_entry(void) {
         "sw s10, 4 * 28(sp)\n"
         "sw s11, 4 * 29(sp)\n"
 
-        // 例外発生時のspを取り出して保存
         "csrr a0, sscratch\n"
         "sw a0,  4 * 30(sp)\n"
 
-        // カーネルスタックを設定し直す
         "addi a0, sp, 4 * 31\n"
         "csrw sscratch, a0\n"
 
@@ -394,7 +349,6 @@ void kernel_entry(void) {
     );
 }
 
-// ↓ __attribute__((naked)) が追加されていることに注意
 __attribute__((naked)) void user_entry(void) {
     __asm__ __volatile__(
         "csrw sepc, %[sepc]\n"
@@ -409,7 +363,6 @@ __attribute__((naked)) void user_entry(void) {
 __attribute__((naked)) void switch_context(uint32_t *prev_sp,
                                            uint32_t *next_sp) {
     __asm__ __volatile__(
-        // 実行中プロセスのスタックへレジスタを保存
         "addi sp, sp, -13 * 4\n"
         "sw ra,  0  * 4(sp)\n"
         "sw s0,  1  * 4(sp)\n"
@@ -424,12 +377,8 @@ __attribute__((naked)) void switch_context(uint32_t *prev_sp,
         "sw s9,  10 * 4(sp)\n"
         "sw s10, 11 * 4(sp)\n"
         "sw s11, 12 * 4(sp)\n"
-
-        // スタックポインタの切り替え
         "sw sp, (a0)\n"
         "lw sp, (a1)\n"
-
-        // 次のプロセスのスタックからレジスタを復元
         "lw ra,  0  * 4(sp)\n"
         "lw s0,  1  * 4(sp)\n"
         "lw s1,  2  * 4(sp)\n"
@@ -445,11 +394,10 @@ __attribute__((naked)) void switch_context(uint32_t *prev_sp,
         "lw s11, 12 * 4(sp)\n"
         "addi sp, sp, 13 * 4\n"
         "ret\n"
-    );    
+    );
 }
 
 struct process *create_process(const void *image, size_t image_size) {
-    // 空いているプロセス管理構造体を探す
     struct process *proc = NULL;
     int i;
     for (i = 0; i < PROCS_MAX; i++) {
@@ -462,7 +410,6 @@ struct process *create_process(const void *image, size_t image_size) {
     if (!proc)
         PANIC("no free process slots");
 
-    // switch_context() で復帰できるように、スタックに呼び出し先保存レジスタを積む
     uint32_t *sp = (uint32_t *) &proc->stack[sizeof(proc->stack)];
     *--sp = 0;                      // s11
     *--sp = 0;                      // s10
@@ -477,43 +424,35 @@ struct process *create_process(const void *image, size_t image_size) {
     *--sp = 0;                      // s1
     *--sp = 0;                      // s0
     *--sp = (uint32_t) user_entry;  // ra
-    
+
     uint32_t *page_table = (uint32_t *) alloc_pages(1);
 
-    // カーネルのページをマッピングする
+    // Kernel pages.
     for (paddr_t paddr = (paddr_t) __kernel_base;
          paddr < (paddr_t) __free_ram_end; paddr += PAGE_SIZE)
         map_page(page_table, paddr, paddr, PAGE_R | PAGE_W | PAGE_X);
 
-    map_page(page_table, VIRTIO_BLK_PADDR, VIRTIO_BLK_PADDR, PAGE_R | PAGE_W); // new
+    // virtio-blk
+    map_page(page_table, VIRTIO_BLK_PADDR, VIRTIO_BLK_PADDR, PAGE_R | PAGE_W);
 
+    // User pages.
     for (uint32_t off = 0; off < image_size; off += PAGE_SIZE) {
         paddr_t page = alloc_pages(1);
-
-        // コピーするデータがページサイズより小さい場合を考慮
-        // https://github.com/nuta/operating-system-in-1000-lines/pull/27
         size_t remaining = image_size - off;
         size_t copy_size = PAGE_SIZE <= remaining ? PAGE_SIZE : remaining;
-
-        // 確保したページにデータをコピー
         memcpy((void *) page, image + off, copy_size);
-
-        // ページテーブルにマッピング
         map_page(page_table, USER_BASE + off, page,
                  PAGE_U | PAGE_R | PAGE_W | PAGE_X);
     }
 
-    // 各フィールドを初期化
     proc->pid = i + 1;
     proc->state = PROC_RUNNABLE;
     proc->sp = (uint32_t) sp;
     proc->page_table = page_table;
     return proc;
-
 }
 
 void yield(void) {
-    // 実行可能なプロセスを探す
     struct process *next = idle_proc;
     for (int i = 0; i < PROCS_MAX; i++) {
         struct process *proc = &procs[(current_proc->pid + i) % PROCS_MAX];
@@ -523,9 +462,11 @@ void yield(void) {
         }
     }
 
-    // 現在実行中のプロセス以外に、実行可能なプロセスがない。戻って処理を続行する
     if (next == current_proc)
         return;
+
+    struct process *prev = current_proc;
+    current_proc = next;
 
     __asm__ __volatile__(
         "sfence.vma\n"
@@ -533,14 +474,10 @@ void yield(void) {
         "sfence.vma\n"
         "csrw sscratch, %[sscratch]\n"
         :
-        // 行末のカンマを忘れずに！
         : [satp] "r" (SATP_SV32 | ((uint32_t) next->page_table / PAGE_SIZE)),
           [sscratch] "r" ((uint32_t) &next->stack[sizeof(next->stack)])
     );
 
-    // コンテキストスイッチ
-    struct process *prev = current_proc;
-    current_proc = next;
     switch_context(&prev->sp, &next->sp);
 }
 
@@ -610,75 +547,28 @@ void handle_trap(struct trap_frame *f) {
     WRITE_CSR(sepc, user_pc);
 }
 
-struct process *proc_a;
-struct process *proc_b;
-
-void proc_a_entry(void) {
-    printf("starting process A\n");
-    while (1) {
-        putchar('A');
-        yield();
-        switch_context(&proc_a->sp, &proc_b->sp);
-        delay();
-    }
-}
-
-void proc_b_entry(void) {
-    printf("starting process B\n");
-    while (1) {
-        putchar('B');
-        switch_context(&proc_b->sp, &proc_a->sp);
-        yield();
-        delay();
-    }
-}
-
 void kernel_main(void) {
-    // printf("2 + 2 = %d, %x\n", 1 + 2, 0x1234abcd);
     memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
-    printf("\n\nHello %s\n", "World!");
-
-    // paddr_t paddr0 = alloc_pages(2);
-    // paddr_t paddr1 = alloc_pages(1);
-    // printf("alloc_pages test: paddr0=%x\n", paddr0);
-    // printf("alloc_pages test: paddr1=%x\n", paddr1);
-
-    // PANIC("booted!");
-    // printf("unreachable here!\n");
-
+    printf("\n\n");
     WRITE_CSR(stvec, (uint32_t) kernel_entry);
-
     virtio_blk_init();
-    // fs_init();
+    fs_init();
 
-    char buf[SECTOR_SIZE];
-    read_write_disk(buf, 0, false);
-    printf("first sector: %s\n", buf);
+    // char buf[SECTOR_SIZE];
+    // read_write_disk(buf, 0, false);
+    // printf("first sector: %s\n", buf);
 
-    strcpy(buf, "hello from kernel!!!\n");
-    read_write_disk(buf, 0, true);
+    // strcpy(buf, "hello from kernel!!!\n");
+    // read_write_disk(buf, 0, true);
 
     idle_proc = create_process(NULL, 0);
     idle_proc->pid = 0; // idle
     current_proc = idle_proc;
 
-    // proc_a = create_process((uint32_t) proc_a_entry);
-    // proc_b = create_process((uint32_t) proc_b_entry);
-
     create_process(_binary_shell_bin_start, (size_t) _binary_shell_bin_size);
-    // proc_a_entry();
-
     yield();
 
     PANIC("switched to idle process");
-
-    // PANIC("unreachable here!");
-
-    // __asm__ __volatile__("unimp");  // Invalid instruction
-
-    // for (;;) {
-    //     __asm__ __volatile__("wfi");
-    // }
 }
 
 __attribute__((section(".text.boot")))
